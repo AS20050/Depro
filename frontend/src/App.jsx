@@ -18,7 +18,7 @@ import {
 
 // --- CONFIG ---
 // const API_URL = "http://52.66.116.188:8080";
-const API_URL = "http://localhost:8080";
+const API_URL = "http://localhost:8000";
 
 // --- STYLES ---
 const customStyles = `
@@ -103,23 +103,26 @@ const AwsAuthModal = ({ isOpen, onSubmit, onCancel }) => {
   );
 }
 
-// --- GITHUB TOKEN MODAL (For CI/CD) ---
+// --- GITHUB TOKEN + AWS CREDS MODAL (For CI/CD) ---
 const GithubAuthModal = ({ isOpen, onSubmit, onCancel }) => {
   const [token, setToken] = useState('');
+  const [awsAccessKey, setAwsAccessKey] = useState('');
+  const [awsSecretKey, setAwsSecretKey] = useState('');
 
   if (!isOpen) return null;
 
   return (
     <div className="absolute inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="w-full max-w-lg bg-zinc-950 border border-purple-500/50 shadow-[0_0_50px_rgba(168,85,247,0.15)] p-8 relative overflow-hidden">
+      <div className="w-full max-w-lg bg-zinc-950 border border-purple-500/50 shadow-[0_0_50px_rgba(168,85,247,0.15)] p-8 relative overflow-hidden max-h-[90vh] overflow-y-auto scrollbar-hide">
         <div className="flex items-center gap-3 mb-6 border-b border-zinc-800 pb-4">
           <GitBranch className="text-purple-500 animate-pulse" size={24} />
           <h2 className="text-purple-500 font-mono text-xl tracking-widest font-bold retro-glow">CI/CD PIPELINE CONFIG</h2>
         </div>
         <p className="text-zinc-400 font-mono text-sm mb-6 leading-relaxed">
-          To enable <span className="text-white bg-zinc-800 px-1">AUTO-DEPLOYMENT</span>, AWS requires a GitHub Personal Access Token (Classic) with <code>repo</code> and <code>admin:repo_hook</code> scopes.
+          To enable <span className="text-white bg-zinc-800 px-1">AUTO-DEPLOYMENT</span>, provide a GitHub PAT and your AWS IAM credentials.
         </p>
         <div className="space-y-4 mb-8">
+          {/* GitHub Token */}
           <div className="group">
             <label className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest mb-1 block">GitHub Personal Access Token</label>
             <div className="relative">
@@ -133,11 +136,40 @@ const GithubAuthModal = ({ isOpen, onSubmit, onCancel }) => {
               * Leave empty to perform a one-time Snapshot deployment (No Auto-Updates).
             </p>
           </div>
+
+          {/* AWS Credentials Section */}
+          <div className="border-t border-zinc-800 pt-4 mt-4">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldCheck className="text-yellow-500" size={16} />
+              <span className="text-[10px] text-yellow-500/80 font-mono uppercase tracking-widest font-bold">AWS IAM Credentials</span>
+            </div>
+          </div>
+          <div className="group">
+            <label className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest mb-1 block">Access Key ID</label>
+            <div className="relative">
+              <Key className="absolute left-3 top-3 text-zinc-600" size={16} />
+              <input type="text" value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)}
+                className="w-full bg-zinc-900 border border-zinc-700 text-yellow-100 font-mono p-2.5 pl-10 focus:border-yellow-500 focus:outline-none transition-all"
+                placeholder="AKIA..."
+              />
+            </div>
+          </div>
+          <div className="group">
+            <label className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest mb-1 block">Secret Access Key</label>
+            <div className="relative">
+              <Lock className="absolute left-3 top-3 text-zinc-600" size={16} />
+              <input type="password" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)}
+                className="w-full bg-zinc-900 border border-zinc-700 text-yellow-100 font-mono p-2.5 pl-10 focus:border-yellow-500 focus:outline-none transition-all"
+                placeholder="••••••••••••••••••••"
+              />
+            </div>
+          </div>
         </div>
         <div className="flex gap-4">
           <TerminalButton onClick={onCancel} variant="ghost" className="flex-1">CANCEL</TerminalButton>
-          <button onClick={() => onSubmit(token)}
-            className="flex-1 bg-purple-500/20 border border-purple-500 text-purple-500 hover:bg-purple-500 hover:text-black py-2 font-mono text-sm tracking-widest transition-all shadow-[0_0_15px_rgba(168,85,247,0.3)]">
+          <button onClick={() => onSubmit({ token, awsAccessKey, awsSecretKey })}
+            disabled={!awsAccessKey || !awsSecretKey}
+            className="flex-1 bg-purple-500/20 border border-purple-500 text-purple-500 hover:bg-purple-500 hover:text-black py-2 font-mono text-sm tracking-widest transition-all shadow-[0_0_15px_rgba(168,85,247,0.3)] disabled:opacity-50 disabled:cursor-not-allowed">
             {token ? "ENABLE CI/CD" : "DEPLOY SNAPSHOT"}
           </button>
         </div>
@@ -262,7 +294,7 @@ export default function App() {
   };
 
   // --- GITHUB HANDLING ---
-  const performGithubDeploy = async (repoUrl, token) => {
+  const performGithubDeploy = async (repoUrl, token, awsCreds = null) => {
     setIsProcessing(true);
     addMessage('system', '>> GitHub Remote Detected. Initiating Clone Sequence...');
     
@@ -271,6 +303,7 @@ export default function App() {
     } else {
         addMessage('system', '>> No Token provided. Fallback to Snapshot Mode.');
     }
+    if (awsCreds) addMessage('system', '>> Authenticating with AWS IAM...');
 
     const intervalId = simulateProgress();
 
@@ -279,6 +312,10 @@ export default function App() {
       formData.append('repo_url', repoUrl);
       if (token) {
           formData.append('github_token', token);
+      }
+      if (awsCreds) {
+          formData.append('aws_access_key_id', awsCreds.awsAccessKey);
+          formData.append('aws_secret_access_key', awsCreds.awsSecretKey);
       }
       
       const res = await fetch(`${API_URL}/upload/github`, { method: 'POST', body: formData });
@@ -297,10 +334,10 @@ export default function App() {
     } finally { setIsProcessing(false); }
   };
 
-  const handleGithubSubmit = (token) => {
+  const handleGithubSubmit = ({ token, awsAccessKey, awsSecretKey }) => {
       setShowGithubModal(false);
       if (pendingRepoUrl) {
-          performGithubDeploy(pendingRepoUrl, token);
+          performGithubDeploy(pendingRepoUrl, token, { awsAccessKey, awsSecretKey });
           setPendingRepoUrl('');
       }
   };
