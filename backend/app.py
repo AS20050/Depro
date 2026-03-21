@@ -20,7 +20,7 @@ from codeReviewLayer.reviewer import review_project
 from aiLayer.decision_engine import decide_and_execute
 from auth.aws_credentials import ask_aws_credentials, inject_aws_creds
 
-app = FastAPI(title="Depro")
+app = FastAPI(title="Opsonic")
 
 # ==========================================
 # 🔌 ENABLE CORS
