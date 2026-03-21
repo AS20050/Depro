@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Terminal, 
-  Upload, 
-  Monitor, 
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { useAuth } from './context/AuthContext';
+import LoginPage from './pages/LoginPage';
+import AuthCallback from './pages/AuthCallback';
+import {
+  Terminal,
+  Upload,
+  Monitor,
   Paperclip,
   CheckCircle,
   AlertCircle,
@@ -13,11 +17,12 @@ import {
   Lock,
   Key,
   ShieldCheck,
-  GitBranch
+  GitBranch,
+  LogOut,
+  User as UserIcon
 } from 'lucide-react';
 
 // --- CONFIG ---
-// const API_URL = "http://52.66.116.188:8080";
 const API_URL = "http://localhost:8000";
 
 // --- STYLES ---
@@ -34,7 +39,7 @@ const customStyles = `
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 `;
 
-// --- COMPONENTS ---
+// --- SHARED COMPONENTS ---
 
 const TerminalButton = ({ children, onClick, variant = 'primary', className = '', icon: Icon, disabled = false }) => {
   const baseStyles = "relative px-4 py-2 font-mono text-sm border transition-all duration-75 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed active:translate-x-[2px] active:translate-y-[2px] active:shadow-none uppercase tracking-widest";
@@ -66,7 +71,7 @@ const AwsAuthModal = ({ isOpen, onSubmit, onCancel }) => {
           <h2 className="text-yellow-500 font-mono text-xl tracking-widest font-bold retro-glow">SECURITY CLEARANCE</h2>
         </div>
         <p className="text-zinc-400 font-mono text-sm mb-6 leading-relaxed">
-          Target artifact <span className="text-white bg-zinc-800 px-1">.JAR</span> requires direct EC2 provisioning. 
+          Target artifact <span className="text-white bg-zinc-800 px-1">.JAR</span> requires direct EC2 provisioning.
           Please authenticate with valid AWS IAM credentials.
         </p>
         <div className="space-y-4 mb-8">
@@ -207,22 +212,33 @@ const SuccessCard = ({ endpoint, deployment, warning }) => (
   </div>
 );
 
-export default function App() {
+
+// =============================================
+// PROTECTED TERMINAL VIEW
+// =============================================
+function TerminalView() {
+  const { user, logout, token } = useAuth();
+  const navigate = useNavigate();
+
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  
+
   // Modals State
   const [showAwsModal, setShowAwsModal] = useState(false);
   const [showGithubModal, setShowGithubModal] = useState(false);
-  
+
   const [pendingFile, setPendingFile] = useState(null);
   const [pendingRepoUrl, setPendingRepoUrl] = useState('');
-  
+
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
-  
+
+  const username = user?.username || 'user';
+  const displayName = user?.display_name || username;
+  const avatarUrl = user?.avatar_url;
+
   const [messages, setMessages] = useState([
-    { id: 1, role: 'system', content: 'OPSonic Kernel v2.4 initialized. Uplink established to ap-south-1.', timestamp: new Date().toLocaleTimeString() },
+    { id: 1, role: 'system', content: `DePro Kernel v3.0 initialized. Welcome back, ${displayName}.`, timestamp: new Date().toLocaleTimeString() },
     { id: 2, role: 'assistant', content: 'System Ready. Upload project source (.zip, .jar) or authorize GitHub repository.', timestamp: new Date().toLocaleTimeString() }
   ]);
 
@@ -294,11 +310,11 @@ export default function App() {
   };
 
   // --- GITHUB HANDLING ---
-  const performGithubDeploy = async (repoUrl, token, awsCreds = null) => {
+  const performGithubDeploy = async (repoUrl, ghToken, awsCreds = null) => {
     setIsProcessing(true);
     addMessage('system', '>> GitHub Remote Detected. Initiating Clone Sequence...');
-    
-    if (token) {
+
+    if (ghToken) {
         addMessage('system', '>> Token detected. Attempting to establish CI/CD Pipeline...');
     } else {
         addMessage('system', '>> No Token provided. Fallback to Snapshot Mode.');
@@ -310,20 +326,20 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('repo_url', repoUrl);
-      if (token) {
-          formData.append('github_token', token);
+      if (ghToken) {
+          formData.append('github_token', ghToken);
       }
       if (awsCreds) {
           formData.append('aws_access_key_id', awsCreds.awsAccessKey);
           formData.append('aws_secret_access_key', awsCreds.awsSecretKey);
       }
-      
+
       const res = await fetch(`${API_URL}/upload/github`, { method: 'POST', body: formData });
       const data = await res.json();
       clearInterval(intervalId);
 
       if (res.ok) {
-         const finalLink = data.endpoint || data.url || data.details?.url; 
+         const finalLink = data.endpoint || data.url || data.details?.url;
          addMessage('assistant', null, 'success', { endpoint: finalLink, deployment: data.deployment, warning: data.warning });
       } else {
         throw new Error(data.detail || "GitHub deployment failed");
@@ -334,10 +350,10 @@ export default function App() {
     } finally { setIsProcessing(false); }
   };
 
-  const handleGithubSubmit = ({ token, awsAccessKey, awsSecretKey }) => {
+  const handleGithubSubmit = ({ token: ghToken, awsAccessKey, awsSecretKey }) => {
       setShowGithubModal(false);
       if (pendingRepoUrl) {
-          performGithubDeploy(pendingRepoUrl, token, { awsAccessKey, awsSecretKey });
+          performGithubDeploy(pendingRepoUrl, ghToken, { awsAccessKey, awsSecretKey });
           setPendingRepoUrl('');
       }
   };
@@ -351,16 +367,21 @@ export default function App() {
 
     if (userInput.includes('github.com')) {
       setPendingRepoUrl(userInput);
-      setShowGithubModal(true); // Trigger GitHub Modal
+      setShowGithubModal(true);
       return;
     }
     setTimeout(() => { addMessage('assistant', 'Syntax Error. Please upload a project file or provide a valid GitHub repository URL.'); }, 600);
   };
 
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
   return (
     <div className="min-h-screen bg-black flex items-center justify-center p-4 md:p-8 font-sans selection:bg-purple-500 selection:text-white overflow-hidden relative">
       <style>{customStyles}</style>
-      
+
       {/* Modals */}
       <AwsAuthModal isOpen={showAwsModal} onSubmit={handleAwsSubmit} onCancel={() => setShowAwsModal(false)} />
       <GithubAuthModal isOpen={showGithubModal} onSubmit={handleGithubSubmit} onCancel={() => setShowGithubModal(false)} />
@@ -372,16 +393,31 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-3">
               <Monitor size={20} className="text-purple-500 animate-pulse retro-glow" />
-              <span className="font-mono text-lg font-bold tracking-[0.2em] text-zinc-100 retro-text-base">OPSONIC</span>
+              <span className="font-mono text-lg font-bold tracking-[0.2em] text-zinc-100 retro-text-base">DEPRO</span>
             </div>
-            <span className="px-3 py-1 bg-purple-900/20 text-purple-300 text-[10px] font-mono border border-purple-500/30 rounded tracking-widest">v2.0.4-LTS</span>
+            <span className="px-3 py-1 bg-purple-900/20 text-purple-300 text-[10px] font-mono border border-purple-500/30 rounded tracking-widest">v3.0.0-LTS</span>
           </div>
-          <div className="flex items-center gap-8 text-[11px] font-mono text-zinc-500 uppercase tracking-widest">
+          <div className="flex items-center gap-6 text-[11px] font-mono text-zinc-500 uppercase tracking-widest">
              <span className="flex items-center gap-2">
                <span className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-yellow-400 retro-glow animate-bounce' : 'bg-green-500 retro-glow'}`}></span>
                SYS_STATUS: {isProcessing ? 'COMPUTING' : 'ONLINE'}
              </span>
              <span>REGION: AP-SOUTH-1</span>
+
+             {/* User Identity */}
+             <div className="flex items-center gap-3 ml-4 pl-4 border-l border-zinc-800">
+               {avatarUrl ? (
+                 <img src={avatarUrl} alt="" className="w-7 h-7 rounded-full border border-purple-500/30 shadow-[0_0_10px_rgba(168,85,247,0.2)]" />
+               ) : (
+                 <div className="w-7 h-7 rounded-full border border-purple-500/30 bg-purple-500/10 flex items-center justify-center">
+                   <UserIcon size={14} className="text-purple-400" />
+                 </div>
+               )}
+               <span className="text-purple-300 normal-case tracking-normal text-xs font-semibold">{displayName}</span>
+               <button onClick={handleLogout} className="text-zinc-600 hover:text-red-400 transition-colors" title="Logout">
+                 <LogOut size={14} />
+               </button>
+             </div>
           </div>
         </header>
         <main className="flex-1 overflow-hidden relative flex flex-col w-full bg-black/40">
@@ -389,21 +425,26 @@ export default function App() {
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-8 space-y-6 font-mono text-base relative z-30 scrollbar-hide">
             <div className="w-full flex justify-center mb-12 opacity-80 select-none pointer-events-none">
               <pre className="text-purple-500/80 font-black text-[10px] sm:text-xs md:text-sm leading-none tracking-tighter retro-glow">
-{`   ___  ____  ____   ___  _   _ ___ ____ 
-  / _ \\|  _ \\/ ___| / _ \\| \\ | |_ _/ ___|
- | | | | |_) \\___ \\| | | |  \\| || | |    
- | |_| |  __/ ___) | |_| | |\\  || | |___ 
-  \\___/|_|   |____/ \\___/|_| \\_|___\\____|`}
+{`  ____       ____            
+ |  _ \\  ___|  _ \\ _ __ ___  
+ | | | |/ _ \\ |_) | '__/ _ \\ 
+ | |_| |  __/  __/| | | (_) |
+ |____/ \\___|_|   |_|  \\___/ `}
               </pre>
             </div>
             <div className="text-zinc-600 text-xs mb-8 border-b border-dashed border-zinc-800 pb-2 flex justify-between tracking-widest">
-              <span>SESSION: 0x8F21-ALPHA</span>
-              <span>PROTOCOL: SECURE_SHELL_V2</span>
+              <span>SESSION: {user?.id?.slice(0, 8) || '0x8F21'}-ACTIVE</span>
+              <span>PROTOCOL: SECURE_SHELL_V3</span>
             </div>
             {messages.map((msg) => (
               <div key={msg.id} className={`group flex gap-6 ${msg.role === 'user' ? 'opacity-90' : 'opacity-100'}`}>
-                <div className="shrink-0 w-40 text-right select-none pt-1">
-                  {msg.role === 'user' ? (<span className="text-zinc-500 font-bold tracking-tight">OPSonic@user:$</span>) : msg.role === 'system' ? (<span className="text-yellow-600/80 font-bold tracking-tight">sys_kernel@log:!</span>) : (<span className="text-purple-400 font-bold tracking-tight retro-glow">root@opsonic:~$</span>)}
+                <div className="shrink-0 w-44 text-right select-none pt-1">
+                  {msg.role === 'user'
+                    ? (<span className="text-cyan-500/80 font-bold tracking-tight">{username}@depro:$</span>)
+                    : msg.role === 'system'
+                    ? (<span className="text-yellow-600/80 font-bold tracking-tight">sys_kernel@log:!</span>)
+                    : (<span className="text-purple-400 font-bold tracking-tight retro-glow">root@depro:~$</span>)
+                  }
                 </div>
                 <div className="flex-1 max-w-4xl">
                   {msg.type === 'success' ? (<SuccessCard endpoint={msg.endpoint} deployment={msg.deployment} warning={msg.warning} />) : msg.type === 'error' ? (
@@ -413,7 +454,7 @@ export default function App() {
                 </div>
               </div>
             ))}
-            {isProcessing && (<div className="flex gap-6 animate-pulse mt-4"><div className="shrink-0 w-40 text-right text-purple-500/50">sys_io@net:~$</div><div className="text-purple-400 flex items-center gap-3 font-mono tracking-widest text-sm"><Loader2 className="w-4 h-4 animate-spin" />EXECUTING_DEPLOYMENT_MATRIX...</div></div>)}
+            {isProcessing && (<div className="flex gap-6 animate-pulse mt-4"><div className="shrink-0 w-44 text-right text-purple-500/50">sys_io@net:~$</div><div className="text-purple-400 flex items-center gap-3 font-mono tracking-widest text-sm"><Loader2 className="w-4 h-4 animate-spin" />EXECUTING_DEPLOYMENT_MATRIX...</div></div>)}
           </div>
           <div className="p-6 bg-black border-t-2 border-zinc-800 relative z-40">
             <div className="flex items-end gap-4 max-w-6xl mx-auto">
@@ -428,10 +469,47 @@ export default function App() {
               </div>
               <TerminalButton onClick={handleSend} disabled={isProcessing} variant="primary" className="h-14 px-8 font-bold text-base tracking-widest">EXECUTE</TerminalButton>
             </div>
-            <div className="mt-3 text-center text-[10px] text-zinc-600 font-mono uppercase tracking-[0.2em]">SECURE CONNECTION • 256-BIT ENCRYPTION • OPSONIC PROTOCOL</div>
+            <div className="mt-3 text-center text-[10px] text-zinc-600 font-mono uppercase tracking-[0.2em]">SECURE CONNECTION • 256-BIT ENCRYPTION • DEPRO PROTOCOL</div>
           </div>
         </main>
       </div>
     </div>
+  );
+}
+
+
+// =============================================
+// PROTECTED ROUTE WRAPPER
+// =============================================
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center font-mono">
+        <Loader2 size={32} className="text-purple-500 animate-spin" />
+      </div>
+    );
+  }
+
+  return isAuthenticated ? children : <Navigate to="/login" replace />;
+}
+
+
+// =============================================
+// APP ROUTER
+// =============================================
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/" element={
+        <ProtectedRoute>
+          <TerminalView />
+        </ProtectedRoute>
+      } />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

@@ -15,3 +15,10 @@ langgraph
 langchain-core
 typing-extensions
 pydantic
+sqlalchemy[asyncio]
+asyncpg
+psycopg2-binary
+passlib[bcrypt]
+python-jose[cryptography]
+httpx
+bcrypt

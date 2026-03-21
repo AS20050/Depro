@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def deploy_amplify_node_ex(source_path, app_name="opsonic-frontend"):
+def deploy_amplify_node_ex(source_path, app_name="depro-frontend"):
     """
     Builds a React/Vite app and deploys the 'dist' folder to AWS Amplify.
     """

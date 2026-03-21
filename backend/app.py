@@ -9,6 +9,7 @@ import os
 import traceback
 import shutil
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +20,30 @@ from fileUploadLayer.services.github_handler import clone_github_repo
 from codeReviewLayer.reviewer import review_project
 from aiLayer.decision_engine import decide_and_execute
 from auth.aws_credentials import ask_aws_credentials, inject_aws_creds
+from auth.routes import router as auth_router
+from auth.github_oauth import router as github_oauth_router
+from db.database import init_db
+from endpoints.dashboard import router as dashboard_router
+from endpoints.deployments import router as deployments_router
+from endpoints.aws_accounts import router as aws_accounts_router
 
-app = FastAPI(title="Opsonic")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database on startup."""
+    await init_db()
+    yield
+
+app = FastAPI(title="DePro", lifespan=lifespan)
+
+# Register auth routers
+app.include_router(auth_router)
+app.include_router(github_oauth_router)
+
+# Register API endpoint routers
+app.include_router(dashboard_router)
+app.include_router(deployments_router)
+app.include_router(aws_accounts_router)
 
 # ==========================================
 # 🔌 ENABLE CORS

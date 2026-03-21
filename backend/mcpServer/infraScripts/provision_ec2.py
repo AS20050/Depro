@@ -81,7 +81,7 @@ def provision_ec2_node_ex():
     # 2. SECURITY GROUP
     # ==========================================
     try:
-        ec2.create_security_group(GroupName=SG_NAME, Description="Opsonic Auto SG")
+        ec2.create_security_group(GroupName=SG_NAME, Description="DePro Auto SG")
         print(f"🛡️  Created Security Group: {SG_NAME}")
         # Allow SSH (22) and Web (80, 8080)
         ec2.authorize_security_group_ingress(

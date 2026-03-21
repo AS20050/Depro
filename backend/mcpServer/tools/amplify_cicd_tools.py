@@ -1,7 +1,7 @@
 import traceback
 from mcpServer.infraScripts.amplify_cicd import connect_amplify_repo_ex
 
-def connect_amplify_cicd(repo_url: str, github_token: str, app_name: str = "opsonic-cicd"):
+def connect_amplify_cicd(repo_url: str, github_token: str, app_name: str = "depro-cicd"):
     """
     MCP Tool: Connects GitHub repo to Amplify for Auto-Deployment (CI/CD).
     """

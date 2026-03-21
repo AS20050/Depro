@@ -50,7 +50,7 @@ def decide_and_execute(context: dict):
         github_token = context.get("github_token")
         
         base_name = context.get('filename', 'app').replace(".zip", "").replace(".", "-").split("/")[-1]
-        app_name = f"opsonic-{base_name}"
+        app_name = f"depro-{base_name}"
 
         # Sub-path: CI/CD
         if repo_url and github_token and "github.com" in repo_url:

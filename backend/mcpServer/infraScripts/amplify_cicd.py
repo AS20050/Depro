@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def connect_amplify_repo_ex(repo_url, github_token, app_name="opsonic-cicd-app"):
+def connect_amplify_repo_ex(repo_url, github_token, app_name="depro-cicd-app"):
     """
     Connects AWS Amplify directly to a GitHub Repository.
     Fixes: React 19/Vite 7/Tailwind 4 support by forcing Amazon Linux 2023.
