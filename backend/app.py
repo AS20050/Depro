@@ -10,10 +10,12 @@ import traceback
 import shutil
 import time
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from jose import jwt, JWTError
 
 from fileUploadLayer.services.zip_handler import extract_zip
 from fileUploadLayer.services.github_handler import clone_github_repo
@@ -26,6 +28,21 @@ from db.database import init_db
 from endpoints.dashboard import router as dashboard_router
 from endpoints.deployments import router as deployments_router
 from endpoints.aws_accounts import router as aws_accounts_router
+from endpoints.deployment_service import record_deployment
+
+JWT_SECRET = os.getenv("JWT_SECRET", "depro-fallback-secret")
+
+
+def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
+    """Try to extract user_id from Bearer token. Returns None if invalid/missing."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        token = authorization.split(" ")[1]
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("sub")
+    except (JWTError, Exception):
+        return None
 
 
 @asynccontextmanager
@@ -70,32 +87,25 @@ EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
 async def upload_file(
     file: UploadFile = File(...),
     aws_access_key_id: str | None = Form(None),
-    aws_secret_access_key: str | None = Form(None)
+    aws_secret_access_key: str | None = Form(None),
+    authorization: Optional[str] = Header(None)
 ):
+    user_id = _extract_user_id(authorization)
     try:
-        # --- 🛡️ SANITIZE FILENAME (FIX FOR PERMISSION ERROR) ---
+        # --- 🛡️ SANITIZE FILENAME ---
         original_name = file.filename
-        
-        # 1. Fallback if empty
         if not original_name:
             original_name = "unknown_file"
-
-        # 2. Strip paths and whitespace (Fixes Windows "folder vs file" issue)
         clean_name = os.path.basename(original_name).strip()
-        
-        # 3. Ensure it's not empty after stripping
         if not clean_name:
             clean_name = f"upload_{int(time.time())}.bin"
-            
         filename = clean_name
         upload_path = UPLOAD_DIR / filename
-        # -------------------------------------------------------
 
         # Save uploaded file
         print(f"📝 Saving to: {upload_path}")
         with open(upload_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
-
         print(f"\n📥 File uploaded: {upload_path}")
 
         # -------------------------------------------------
@@ -103,73 +113,90 @@ async def upload_file(
         # -------------------------------------------------
         if filename.endswith(".zip"):
             extract_path = EXTRACT_DIR
-            
             if extract_path.exists():
                 shutil.rmtree(extract_path)
             extract_path.mkdir(parents=True, exist_ok=True)
-
             extract_zip(upload_path, extract_path)
             print(f"📂 ZIP extracted to: {extract_path}")
 
             review_output = review_project(str(extract_path))
-            
             deployment_context = review_output.copy()
             deployment_context["project_path"] = str(extract_path)
             deployment_context["filename"] = filename
             deployment_context["repo_url"] = None
             deployment_context["github_token"] = None
 
-            return decide_and_execute(deployment_context)
+            result = decide_and_execute(deployment_context)
+
+            # 📝 Record to DB
+            if user_id:
+                dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+                await record_deployment(
+                    user_id=user_id,
+                    source_type="zip",
+                    source_filename=filename,
+                    file_path=str(upload_path),
+                    project_type=result.get("project_type") or review_output.get("type"),
+                    deployment_type=result.get("deployment"),
+                    status=dep_status,
+                    endpoint=result.get("endpoint") or result.get("url") or (result.get("details", {}) or {}).get("url"),
+                    app_id=result.get("app_id"),
+                    aws_service=result.get("deployment", "amplify").split("_")[0] if result.get("deployment") else "amplify",
+                    error_message=result.get("error")
+                )
+            return result
 
         # -------------------------------------------------
         # JAR PATH → direct EC2 deployment
         # -------------------------------------------------
         if filename.endswith(".jar"):
             print("\n📦 JAR detected → direct EC2 deployment")
-
-            # Check Frontend Creds first
             if aws_access_key_id and aws_secret_access_key:
                 print("🔐 AWS Credentials received via API.")
                 creds = {
                     "AWS_ACCESS_KEY_ID": aws_access_key_id,
                     "AWS_SECRET_ACCESS_KEY": aws_secret_access_key,
-                    "AWS_DEFAULT_REGION": "ap-south-1" 
+                    "AWS_DEFAULT_REGION": "ap-south-1"
                 }
             else:
                 print("⚠️ No API credentials found. Falling back to terminal input...")
                 creds = ask_aws_credentials()
-
             inject_aws_creds(creds)
 
-            # SET ENV VARS FOR DEPLOY SCRIPT
             os.environ["APP_FILE"] = filename
             os.environ["APP_PORT"] = "8080"
             os.environ["KEY_NAME"] = "ubuntu-auto-keypair-v2"
 
-            print("⚙️ Deployment env set:")
-            print(f"   APP_FILE={os.environ['APP_FILE']}")
-
-            # Copy JAR to project root
             root_jar_path = Path(filename)
-            # Remove existing if present to avoid permission errors on copy
             if root_jar_path.exists():
                 try:
                     os.remove(root_jar_path)
                 except:
                     pass
-            
             shutil.copy(upload_path, root_jar_path)
-            print(f"📄 Copied JAR to project root: {root_jar_path}")
 
-            # Trigger MCP deployment
-            return decide_and_execute({
+            result = decide_and_execute({
                 "artifact_type": "jar",
                 "artifact_path": str(upload_path)
             })
 
-        # -------------------------------------------------
-        # Unsupported file
-        # -------------------------------------------------
+            # 📝 Record to DB
+            if user_id:
+                dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+                await record_deployment(
+                    user_id=user_id,
+                    source_type="jar",
+                    source_filename=filename,
+                    file_path=str(upload_path),
+                    project_type="backend",
+                    deployment_type="ec2",
+                    status=dep_status,
+                    endpoint=result.get("endpoint") or result.get("url"),
+                    aws_service="ec2",
+                    error_message=result.get("error")
+                )
+            return result
+
         return {
             "status": "uploaded",
             "file": filename,
@@ -180,6 +207,18 @@ async def upload_file(
         print("---------------- ERROR TRACEBACK ----------------")
         traceback.print_exc()
         print("------------------------------------------------")
+        # Record failure
+        if user_id:
+            try:
+                await record_deployment(
+                    user_id=user_id,
+                    source_type="zip" if file.filename and file.filename.endswith(".zip") else "jar",
+                    source_filename=file.filename,
+                    status="failed",
+                    error_message=str(e)
+                )
+            except:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -194,10 +233,7 @@ async def review_repo(request: ReviewRequest):
     try:
         print(f"\n🔍 Starting review for: {request.project_path}")
         result = review_project(request.project_path)
-        return {
-            "status": "success",
-            "review": result
-        }
+        return {"status": "success", "review": result}
     except Exception as e:
         print("---------------- ERROR TRACEBACK ----------------")
         traceback.print_exc()
@@ -211,30 +247,56 @@ async def review_repo(request: ReviewRequest):
 @app.post("/upload/github")
 async def upload_github_repo(
     repo_url: str = Form(...),
-    github_token: str | None = Form(None)
+    github_token: str | None = Form(None),
+    authorization: Optional[str] = Header(None)
 ):
+    user_id = _extract_user_id(authorization)
     try:
-        # 1. Clone
         repo_path = clone_github_repo(repo_url, github_token)
         print(f"\n📦 GitHub repo cloned to: {repo_path}")
 
-        # 2. Review
         review_output = review_project(repo_path)
-        
-        # 3. Context Injection
         deployment_context = review_output.copy()
         deployment_context["project_path"] = repo_path
-        deployment_context["filename"] = repo_url.split("/")[-1] 
+        deployment_context["filename"] = repo_url.split("/")[-1]
         deployment_context["repo_url"] = repo_url
         deployment_context["github_token"] = github_token
 
-        # 4. Execute
-        return decide_and_execute(deployment_context)
+        result = decide_and_execute(deployment_context)
+
+        # 📝 Record to DB
+        if user_id:
+            dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+            await record_deployment(
+                user_id=user_id,
+                source_type="github",
+                source_filename=repo_url.split("/")[-1],
+                repo_url=repo_url,
+                project_type=result.get("project_type") or review_output.get("type"),
+                deployment_type=result.get("deployment"),
+                status=dep_status,
+                endpoint=result.get("endpoint") or result.get("url") or (result.get("details", {}) or {}).get("url"),
+                app_id=result.get("app_id"),
+                aws_service=result.get("deployment", "amplify").split("_")[0] if result.get("deployment") else "amplify",
+                error_message=result.get("error")
+            )
+        return result
 
     except Exception as e:
         print("---------------- ERROR TRACEBACK ----------------")
         traceback.print_exc()
         print("------------------------------------------------")
+        if user_id:
+            try:
+                await record_deployment(
+                    user_id=user_id,
+                    source_type="github",
+                    repo_url=repo_url,
+                    status="failed",
+                    error_message=str(e)
+                )
+            except:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
