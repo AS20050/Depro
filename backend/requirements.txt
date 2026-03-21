@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+gitpython
+openai
+python-dotenv
+google-genai
+ollama
+boto3
+botocore
+requests
+paramiko
+cryptography
+langgraph
+langchain-core
+typing-extensions
+pydantic
