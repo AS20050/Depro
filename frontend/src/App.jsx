@@ -4,6 +4,7 @@ import { useAuth } from './context/AuthContext';
 import LoginPage from './pages/LoginPage';
 import AuthCallback from './pages/AuthCallback';
 import DashboardPage from './pages/DashboardPage';
+import BillingDashboard from './pages/BillingDashboard';
 import {
   Monitor, Paperclip, Globe, Loader2, Server, Github, Lock, Key,
   ShieldCheck, GitBranch, AlertCircle, LogOut, User as UserIcon,
@@ -328,6 +329,14 @@ function AppShell() {
             }`}>
             <TerminalIcon size={18} /> Terminal
           </button>
+          <button onClick={() => setActiveView('billing')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold tracking-wide transition-all ${
+              activeView === 'billing'
+                ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 border border-transparent'
+            }`}>
+            <Rocket size={18} /> Billing
+          </button>
         </nav>
 
         {/* User Section */}
@@ -355,9 +364,11 @@ function AppShell() {
       <main className="flex-1 flex flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top,rgba(168,85,247,0.03),transparent_60%)]">
         {activeView === 'dashboard' ? (
           <DashboardPage onOpenTerminal={() => setActiveView('terminal')} />
-        ) : (
+        ) : activeView === 'terminal' ? (
           <TerminalPanel onClose={() => setActiveView('dashboard')} />
-        )}
+        ) : activeView === 'billing' ? (
+          <BillingDashboard />
+        ) : null}
       </main>
     </div>
   );

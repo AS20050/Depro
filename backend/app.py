@@ -1,9 +1,315 @@
+# import sys
+# from pathlib import Path
+# sys.path.append(str(Path(__file__).parent))
+
+# from dotenv import load_dotenv
+# load_dotenv()
+# from billing_routes import router as billing_router
+# import os
+# import traceback
+# import shutil
+# import time
+# from contextlib import asynccontextmanager
+# from typing import Optional
+
+# from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+# from fastapi.middleware.cors import CORSMiddleware
+# from pydantic import BaseModel
+# from jose import jwt, JWTError
+
+# from fileUploadLayer.services.zip_handler import extract_zip
+# from fileUploadLayer.services.github_handler import clone_github_repo
+# from codeReviewLayer.reviewer import review_project
+# from aiLayer.decision_engine import decide_and_execute
+# from auth.aws_credentials import ask_aws_credentials, inject_aws_creds
+# from auth.routes import router as auth_router
+# from auth.github_oauth import router as github_oauth_router
+# from db.database import init_db
+# from endpoints.dashboard import router as dashboard_router
+# from endpoints.deployments import router as deployments_router
+# from endpoints.aws_accounts import router as aws_accounts_router
+# from endpoints.deployment_service import record_deployment
+
+# JWT_SECRET = os.getenv("JWT_SECRET", "depro-fallback-secret")
+
+
+# def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
+#     """Try to extract user_id from Bearer token. Returns None if invalid/missing."""
+#     if not authorization or not authorization.startswith("Bearer "):
+#         return None
+#     try:
+#         token = authorization.split(" ")[1]
+#         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+#         return payload.get("sub")
+#     except (JWTError, Exception):
+#         return None
+
+
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     """Initialize database on startup."""
+#     await init_db()
+#     yield
+
+# app = FastAPI(title="DePro", lifespan=lifespan)
+
+# # Register auth routers
+# app.include_router(auth_router)
+# app.include_router(github_oauth_router)
+
+# # Register API endpoint routers
+# app.include_router(dashboard_router)
+# app.include_router(deployments_router)
+# app.include_router(aws_accounts_router)
+
+# # ==========================================
+# # 🔌 ENABLE CORS
+# # ==========================================
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+# app.include_router(billing_router, prefix="/billing", tags=["Billing"])
+# # ---------------- STORAGE ----------------
+# UPLOAD_DIR = Path("storage/uploads")
+# EXTRACT_DIR = Path("storage/extracted/zip")
+
+# UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
+
+# # =========================================================
+# # 1️⃣ GENERIC UPLOAD + ORCHESTRATION
+# # =========================================================
+# @app.post("/upload")
+# async def upload_file(
+#     file: UploadFile = File(...),
+#     aws_access_key_id: str | None = Form(None),
+#     aws_secret_access_key: str | None = Form(None),
+#     authorization: Optional[str] = Header(None)
+# ):
+#     user_id = _extract_user_id(authorization)
+#     try:
+#         # --- 🛡️ SANITIZE FILENAME ---
+#         original_name = file.filename
+#         if not original_name:
+#             original_name = "unknown_file"
+#         clean_name = os.path.basename(original_name).strip()
+#         if not clean_name:
+#             clean_name = f"upload_{int(time.time())}.bin"
+#         filename = clean_name
+#         upload_path = UPLOAD_DIR / filename
+
+#         # Save uploaded file
+#         print(f"📝 Saving to: {upload_path}")
+#         with open(upload_path, "wb") as f:
+#             shutil.copyfileobj(file.file, f)
+#         print(f"\n📥 File uploaded: {upload_path}")
+
+#         # -------------------------------------------------
+#         # ZIP PATH → extract → review → AI decision
+#         # -------------------------------------------------
+#         if filename.endswith(".zip"):
+#             extract_path = EXTRACT_DIR
+#             if extract_path.exists():
+#                 shutil.rmtree(extract_path)
+#             extract_path.mkdir(parents=True, exist_ok=True)
+#             extract_zip(upload_path, extract_path)
+#             print(f"📂 ZIP extracted to: {extract_path}")
+
+#             review_output = review_project(str(extract_path))
+#             deployment_context = review_output.copy()
+#             deployment_context["project_path"] = str(extract_path)
+#             deployment_context["filename"] = filename
+#             deployment_context["repo_url"] = None
+#             deployment_context["github_token"] = None
+
+#             result = decide_and_execute(deployment_context)
+
+#             # 📝 Record to DB
+#             if user_id:
+#                 dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+#                 await record_deployment(
+#                     user_id=user_id,
+#                     source_type="zip",
+#                     source_filename=filename,
+#                     file_path=str(upload_path),
+#                     project_type=result.get("project_type") or review_output.get("type"),
+#                     deployment_type=result.get("deployment"),
+#                     status=dep_status,
+#                     endpoint=result.get("endpoint") or result.get("url") or (result.get("details", {}) or {}).get("url"),
+#                     app_id=result.get("app_id"),
+#                     aws_service=result.get("deployment", "amplify").split("_")[0] if result.get("deployment") else "amplify",
+#                     error_message=result.get("error")
+#                 )
+#             return result
+
+#         # -------------------------------------------------
+#         # JAR PATH → direct EC2 deployment
+#         # -------------------------------------------------
+#         if filename.endswith(".jar"):
+#             print("\n📦 JAR detected → direct EC2 deployment")
+#             if aws_access_key_id and aws_secret_access_key:
+#                 print("🔐 AWS Credentials received via API.")
+#                 creds = {
+#                     "AWS_ACCESS_KEY_ID": aws_access_key_id,
+#                     "AWS_SECRET_ACCESS_KEY": aws_secret_access_key,
+#                     "AWS_DEFAULT_REGION": "ap-south-1"
+#                 }
+#             else:
+#                 print("⚠️ No API credentials found. Falling back to terminal input...")
+#                 creds = ask_aws_credentials()
+#             inject_aws_creds(creds)
+
+#             os.environ["APP_FILE"] = filename
+#             os.environ["APP_PORT"] = "8080"
+#             os.environ["KEY_NAME"] = "ubuntu-auto-keypair-v2"
+
+#             root_jar_path = Path(filename)
+#             if root_jar_path.exists():
+#                 try:
+#                     os.remove(root_jar_path)
+#                 except:
+#                     pass
+#             shutil.copy(upload_path, root_jar_path)
+
+#             result = decide_and_execute({
+#                 "artifact_type": "jar",
+#                 "artifact_path": str(upload_path)
+#             })
+
+#             # 📝 Record to DB
+#             if user_id:
+#                 dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+#                 await record_deployment(
+#                     user_id=user_id,
+#                     source_type="jar",
+#                     source_filename=filename,
+#                     file_path=str(upload_path),
+#                     project_type="backend",
+#                     deployment_type="ec2",
+#                     status=dep_status,
+#                     endpoint=result.get("endpoint") or result.get("url"),
+#                     aws_service="ec2",
+#                     error_message=result.get("error")
+#                 )
+#             return result
+
+#         return {
+#             "status": "uploaded",
+#             "file": filename,
+#             "message": "File stored. No deployment pipeline for this file type yet."
+#         }
+
+#     except Exception as e:
+#         print("---------------- ERROR TRACEBACK ----------------")
+#         traceback.print_exc()
+#         print("------------------------------------------------")
+#         # Record failure
+#         if user_id:
+#             try:
+#                 await record_deployment(
+#                     user_id=user_id,
+#                     source_type="zip" if file.filename and file.filename.endswith(".zip") else "jar",
+#                     source_filename=file.filename,
+#                     status="failed",
+#                     error_message=str(e)
+#                 )
+#             except:
+#                 pass
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# # =========================================================
+# # 2️⃣ STANDALONE REVIEW ENDPOINT
+# # =========================================================
+# class ReviewRequest(BaseModel):
+#     project_path: str
+
+# @app.post("/review")
+# async def review_repo(request: ReviewRequest):
+#     try:
+#         print(f"\n🔍 Starting review for: {request.project_path}")
+#         result = review_project(request.project_path)
+#         return {"status": "success", "review": result}
+#     except Exception as e:
+#         print("---------------- ERROR TRACEBACK ----------------")
+#         traceback.print_exc()
+#         print("------------------------------------------------")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# # =========================================================
+# # 3️⃣ GITHUB UPLOAD
+# # =========================================================
+# @app.post("/upload/github")
+# async def upload_github_repo(
+#     repo_url: str = Form(...),
+#     github_token: str | None = Form(None),
+#     authorization: Optional[str] = Header(None)
+# ):
+#     user_id = _extract_user_id(authorization)
+#     try:
+#         repo_path = clone_github_repo(repo_url, github_token)
+#         print(f"\n📦 GitHub repo cloned to: {repo_path}")
+
+#         review_output = review_project(repo_path)
+#         deployment_context = review_output.copy()
+#         deployment_context["project_path"] = repo_path
+#         deployment_context["filename"] = repo_url.split("/")[-1]
+#         deployment_context["repo_url"] = repo_url
+#         deployment_context["github_token"] = github_token
+
+#         result = decide_and_execute(deployment_context)
+
+#         # 📝 Record to DB
+#         if user_id:
+#             dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
+#             await record_deployment(
+#                 user_id=user_id,
+#                 source_type="github",
+#                 source_filename=repo_url.split("/")[-1],
+#                 repo_url=repo_url,
+#                 project_type=result.get("project_type") or review_output.get("type"),
+#                 deployment_type=result.get("deployment"),
+#                 status=dep_status,
+#                 endpoint=result.get("endpoint") or result.get("url") or (result.get("details", {}) or {}).get("url"),
+#                 app_id=result.get("app_id"),
+#                 aws_service=result.get("deployment", "amplify").split("_")[0] if result.get("deployment") else "amplify",
+#                 error_message=result.get("error")
+#             )
+#         return result
+
+#     except Exception as e:
+#         print("---------------- ERROR TRACEBACK ----------------")
+#         traceback.print_exc()
+#         print("------------------------------------------------")
+#         if user_id:
+#             try:
+#                 await record_deployment(
+#                     user_id=user_id,
+#                     source_type="github",
+#                     repo_url=repo_url,
+#                     status="failed",
+#                     error_message=str(e)
+#                 )
+#             except:
+#                 pass
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")  # explicit path fixes .env not loading
 
 import os
 import traceback
@@ -29,6 +335,7 @@ from endpoints.dashboard import router as dashboard_router
 from endpoints.deployments import router as deployments_router
 from endpoints.aws_accounts import router as aws_accounts_router
 from endpoints.deployment_service import record_deployment
+from billing_routes import router as billing_router
 
 JWT_SECRET = os.getenv("JWT_SECRET", "depro-fallback-secret")
 
@@ -38,7 +345,7 @@ def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
     if not authorization or not authorization.startswith("Bearer "):
         return None
     try:
-        token = authorization.split(" ")[1]
+        token   = authorization.split(" ")[1]
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload.get("sub")
     except (JWTError, Exception):
@@ -51,19 +358,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     yield
 
+
 app = FastAPI(title="DePro", lifespan=lifespan)
 
-# Register auth routers
-app.include_router(auth_router)
-app.include_router(github_oauth_router)
-
-# Register API endpoint routers
-app.include_router(dashboard_router)
-app.include_router(deployments_router)
-app.include_router(aws_accounts_router)
-
 # ==========================================
-# 🔌 ENABLE CORS
+# CORS — added FIRST before all routers
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
@@ -73,12 +372,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# ALL ROUTERS
+# ==========================================
+app.include_router(auth_router)
+app.include_router(github_oauth_router)
+app.include_router(dashboard_router)
+app.include_router(deployments_router)
+app.include_router(aws_accounts_router)
+app.include_router(billing_router, prefix="/billing", tags=["Billing"])
+
 # ---------------- STORAGE ----------------
-UPLOAD_DIR = Path("storage/uploads")
+UPLOAD_DIR  = Path("storage/uploads")
 EXTRACT_DIR = Path("storage/extracted/zip")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # =========================================================
 # 1️⃣ GENERIC UPLOAD + ORCHESTRATION
@@ -92,24 +402,23 @@ async def upload_file(
 ):
     user_id = _extract_user_id(authorization)
     try:
-        # --- 🛡️ SANITIZE FILENAME ---
         original_name = file.filename
         if not original_name:
             original_name = "unknown_file"
         clean_name = os.path.basename(original_name).strip()
         if not clean_name:
             clean_name = f"upload_{int(time.time())}.bin"
-        filename = clean_name
+
+        filename    = clean_name
         upload_path = UPLOAD_DIR / filename
 
-        # Save uploaded file
         print(f"📝 Saving to: {upload_path}")
         with open(upload_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         print(f"\n📥 File uploaded: {upload_path}")
 
         # -------------------------------------------------
-        # ZIP PATH → extract → review → AI decision
+        # ZIP → extract → review → AI decision
         # -------------------------------------------------
         if filename.endswith(".zip"):
             extract_path = EXTRACT_DIR
@@ -119,16 +428,15 @@ async def upload_file(
             extract_zip(upload_path, extract_path)
             print(f"📂 ZIP extracted to: {extract_path}")
 
-            review_output = review_project(str(extract_path))
+            review_output      = review_project(str(extract_path))
             deployment_context = review_output.copy()
             deployment_context["project_path"] = str(extract_path)
-            deployment_context["filename"] = filename
-            deployment_context["repo_url"] = None
+            deployment_context["filename"]     = filename
+            deployment_context["repo_url"]     = None
             deployment_context["github_token"] = None
 
             result = decide_and_execute(deployment_context)
 
-            # 📝 Record to DB
             if user_id:
                 dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
                 await record_deployment(
@@ -147,20 +455,21 @@ async def upload_file(
             return result
 
         # -------------------------------------------------
-        # JAR PATH → direct EC2 deployment
+        # JAR → direct EC2 deployment
         # -------------------------------------------------
         if filename.endswith(".jar"):
             print("\n📦 JAR detected → direct EC2 deployment")
             if aws_access_key_id and aws_secret_access_key:
                 print("🔐 AWS Credentials received via API.")
                 creds = {
-                    "AWS_ACCESS_KEY_ID": aws_access_key_id,
+                    "AWS_ACCESS_KEY_ID":     aws_access_key_id,
                     "AWS_SECRET_ACCESS_KEY": aws_secret_access_key,
-                    "AWS_DEFAULT_REGION": "ap-south-1"
+                    "AWS_DEFAULT_REGION":    "ap-south-1"
                 }
             else:
                 print("⚠️ No API credentials found. Falling back to terminal input...")
                 creds = ask_aws_credentials()
+
             inject_aws_creds(creds)
 
             os.environ["APP_FILE"] = filename
@@ -171,7 +480,7 @@ async def upload_file(
             if root_jar_path.exists():
                 try:
                     os.remove(root_jar_path)
-                except:
+                except Exception:
                     pass
             shutil.copy(upload_path, root_jar_path)
 
@@ -180,7 +489,6 @@ async def upload_file(
                 "artifact_path": str(upload_path)
             })
 
-            # 📝 Record to DB
             if user_id:
                 dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
                 await record_deployment(
@@ -198,8 +506,8 @@ async def upload_file(
             return result
 
         return {
-            "status": "uploaded",
-            "file": filename,
+            "status":  "uploaded",
+            "file":    filename,
             "message": "File stored. No deployment pipeline for this file type yet."
         }
 
@@ -207,7 +515,6 @@ async def upload_file(
         print("---------------- ERROR TRACEBACK ----------------")
         traceback.print_exc()
         print("------------------------------------------------")
-        # Record failure
         if user_id:
             try:
                 await record_deployment(
@@ -217,7 +524,7 @@ async def upload_file(
                     status="failed",
                     error_message=str(e)
                 )
-            except:
+            except Exception:
                 pass
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -227,6 +534,7 @@ async def upload_file(
 # =========================================================
 class ReviewRequest(BaseModel):
     project_path: str
+
 
 @app.post("/review")
 async def review_repo(request: ReviewRequest):
@@ -246,8 +554,8 @@ async def review_repo(request: ReviewRequest):
 # =========================================================
 @app.post("/upload/github")
 async def upload_github_repo(
-    repo_url: str = Form(...),
-    github_token: str | None = Form(None),
+    repo_url:      str          = Form(...),
+    github_token:  str | None   = Form(None),
     authorization: Optional[str] = Header(None)
 ):
     user_id = _extract_user_id(authorization)
@@ -255,16 +563,15 @@ async def upload_github_repo(
         repo_path = clone_github_repo(repo_url, github_token)
         print(f"\n📦 GitHub repo cloned to: {repo_path}")
 
-        review_output = review_project(repo_path)
+        review_output      = review_project(repo_path)
         deployment_context = review_output.copy()
         deployment_context["project_path"] = repo_path
-        deployment_context["filename"] = repo_url.split("/")[-1]
-        deployment_context["repo_url"] = repo_url
+        deployment_context["filename"]     = repo_url.split("/")[-1]
+        deployment_context["repo_url"]     = repo_url
         deployment_context["github_token"] = github_token
 
         result = decide_and_execute(deployment_context)
 
-        # 📝 Record to DB
         if user_id:
             dep_status = "success" if result.get("status") == "success" or result.get("endpoint") else "failed"
             await record_deployment(
@@ -295,7 +602,7 @@ async def upload_github_repo(
                     status="failed",
                     error_message=str(e)
                 )
-            except:
+            except Exception:
                 pass
         raise HTTPException(status_code=500, detail=str(e))
 
