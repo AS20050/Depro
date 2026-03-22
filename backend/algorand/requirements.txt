@@ -23,3 +23,12 @@ python-jose[cryptography]
 httpx
 bcrypt
 py-algorand-sdk
+fastapi
+uvicorn
+python-dotenv
+cryptography
+py-algorand-sdk
+algosdk
+pydantic
+algorand-sdk
+puyapy

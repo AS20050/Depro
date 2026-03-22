@@ -160,7 +160,7 @@ function TerminalPanel({ onClose }) {
   const handleFileSelection = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.name.endsWith('.jar')) { setPendingFile(file); setShowAwsModal(true); return; }
+    // Always attempt upload first — backend checks vault for creds
     performUpload(file);
   };
 
@@ -171,23 +171,46 @@ function TerminalPanel({ onClose }) {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      if (awsCreds) { formData.append('aws_access_key_id', awsCreds.accessKey); formData.append('aws_secret_access_key', awsCreds.secretKey); }
+      if (awsCreds) {
+        formData.append('aws_access_key_id', awsCreds.accessKey);
+        formData.append('aws_secret_access_key', awsCreds.secretKey);
+        if (awsCreds.region) formData.append('aws_default_region', awsCreds.region);
+      }
       const headers = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${API_URL}/upload`, { method: 'POST', body: formData, headers });
       const data = await res.json();
       clearInterval(intervalId);
+
+      // Backend says: "I need credentials first"
+      if (data.status === 'needs_credentials') {
+        addMessage('system', '🔐 AWS credentials required (one-time setup). They will be encrypted and stored in Algorand vault.');
+        setPendingFile(file);
+        setShowAwsModal(true);
+        return;
+      }
+
       if (res.ok) {
         const finalLink = data.endpoint || data.url || data.details?.url;
         addMessage('assistant', null, 'success', { endpoint: finalLink, deployment: data.deployment, warning: data.warning });
       } else { throw new Error(data.detail || "Upload failed"); }
     } catch (error) { clearInterval(intervalId); addMessage('system', `FAILURE: ${error.message}`, 'error'); }
-    finally { setIsProcessing(false); setPendingFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }
+    finally { setIsProcessing(false); if (!pendingFile) { if (fileInputRef.current) fileInputRef.current.value = ""; } }
   };
 
-  const handleAwsSubmit = (creds) => { setShowAwsModal(false); if (pendingFile) performUpload(pendingFile, creds); };
+  const handleAwsSubmit = (creds) => {
+    setShowAwsModal(false);
+    if (pendingFile) {
+      performUpload(pendingFile, creds);
+      setPendingFile(null);
+    } else if (pendingRepoUrl) {
+      // Re-submit GitHub with AWS creds
+      performGithubDeploy(pendingRepoUrl, null, { awsAccessKey: creds.accessKey, awsSecretKey: creds.secretKey });
+      setPendingRepoUrl('');
+    }
+  };
 
-  const performGithubDeploy = async (repoUrl, ghToken, awsCreds = null) => {
+  const performGithubDeploy = async (repoUrl, ghToken = null, awsCreds = null) => {
     setIsProcessing(true);
     addMessage('system', '>> GitHub clone initiated...');
     const intervalId = simulateProgress();
@@ -195,12 +218,33 @@ function TerminalPanel({ onClose }) {
       const formData = new FormData();
       formData.append('repo_url', repoUrl);
       if (ghToken) formData.append('github_token', ghToken);
-      if (awsCreds) { formData.append('aws_access_key_id', awsCreds.awsAccessKey); formData.append('aws_secret_access_key', awsCreds.awsSecretKey); }
+      if (awsCreds) {
+        formData.append('aws_access_key_id', awsCreds.awsAccessKey);
+        formData.append('aws_secret_access_key', awsCreds.awsSecretKey);
+        if (awsCreds.awsRegion) formData.append('aws_default_region', awsCreds.awsRegion);
+      }
       const headers = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${API_URL}/upload/github`, { method: 'POST', body: formData, headers });
       const data = await res.json();
       clearInterval(intervalId);
+
+      // Backend says: "I need credentials"
+      if (data.status === 'needs_credentials') {
+        const needsGH = data.needs?.includes('github_token');
+        const needsAWS = data.needs?.includes('aws_iam');
+        if (needsGH && needsAWS) {
+          addMessage('system', '🔐 GitHub PAT + AWS credentials required (one-time setup).');
+          setPendingRepoUrl(repoUrl);
+          setShowGithubModal(true);
+        } else if (needsAWS) {
+          addMessage('system', '🔐 AWS credentials required (one-time setup). They will be stored in Algorand vault.');
+          setPendingRepoUrl(repoUrl);
+          setShowAwsModal(true);
+        }
+        return;
+      }
+
       if (res.ok) {
         const finalLink = data.endpoint || data.url || data.details?.url;
         addMessage('assistant', null, 'success', { endpoint: finalLink, deployment: data.deployment, warning: data.warning });
@@ -211,7 +255,10 @@ function TerminalPanel({ onClose }) {
 
   const handleGithubSubmit = ({ token: ghToken, awsAccessKey, awsSecretKey }) => {
     setShowGithubModal(false);
-    if (pendingRepoUrl) { performGithubDeploy(pendingRepoUrl, ghToken, { awsAccessKey, awsSecretKey }); setPendingRepoUrl(''); }
+    if (pendingRepoUrl) {
+      performGithubDeploy(pendingRepoUrl, ghToken, { awsAccessKey, awsSecretKey });
+      setPendingRepoUrl('');
+    }
   };
 
   const handleSend = () => {
@@ -219,7 +266,11 @@ function TerminalPanel({ onClose }) {
     const userInput = input.trim();
     addMessage('user', userInput);
     setInput('');
-    if (userInput.includes('github.com')) { setPendingRepoUrl(userInput); setShowGithubModal(true); return; }
+    if (userInput.includes('github.com')) {
+      // Try deploy first — backend checks vault for creds
+      performGithubDeploy(userInput);
+      return;
+    }
     setTimeout(() => addMessage('assistant', 'Upload a project file or paste a GitHub URL to deploy.'), 600);
   };
 

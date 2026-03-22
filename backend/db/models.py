@@ -19,9 +19,19 @@ class User(Base):
     github_token = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+    # AWS vault reference — stores only the access key ID (lookup key for Algorand vault)
+    # The actual secret is encrypted and stored in Algorand box storage, never in this DB
+    aws_access_key_id = Column(String(50), nullable=True)
+    aws_default_region = Column(String(30), default="ap-south-1")
+
+    # Billing alert tracking — prevents duplicate emails
+    billing_alerted_total = Column(Float, default=0.0)
+    billing_alert_sent_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     deployments = relationship("Deployment", back_populates="user", cascade="all, delete-orphan")
     aws_accounts = relationship("AWSAccount", back_populates="user", cascade="all, delete-orphan")
+    billing_thresholds = relationship("BillingThreshold", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User {self.username}>"
@@ -34,20 +44,20 @@ class Deployment(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
     # Source info
-    source_type = Column(String(20), nullable=True)       # "zip", "jar", "github"
-    source_filename = Column(String(255), nullable=True)   # original filename for zip/jar
-    repo_url = Column(Text, nullable=True)                 # github URL
-    file_path = Column(Text, nullable=True)                # local path to stored zip/jar
+    source_type = Column(String(20), nullable=True)
+    source_filename = Column(String(255), nullable=True)
+    repo_url = Column(Text, nullable=True)
+    file_path = Column(Text, nullable=True)
 
     # Deployment info
-    project_type = Column(String(50), nullable=True)       # frontend, backend, fullstack
-    deployment_type = Column(String(50), nullable=True)    # amplify_cicd, amplify_snapshot, ec2
-    status = Column(String(20), default="pending")         # pending, running, success, failed, stopped
-    endpoint = Column(Text, nullable=True)                 # live URL
-    app_id = Column(String(100), nullable=True)            # AWS app ID
+    project_type = Column(String(50), nullable=True)
+    deployment_type = Column(String(50), nullable=True)
+    status = Column(String(20), default="pending")
+    endpoint = Column(Text, nullable=True)
+    app_id = Column(String(100), nullable=True)
 
     # AWS service used
-    aws_service = Column(String(50), nullable=True)        # amplify, ec2, s3
+    aws_service = Column(String(50), nullable=True)
     aws_region = Column(String(30), default="ap-south-1")
 
     error_message = Column(Text, nullable=True)
@@ -66,8 +76,8 @@ class AWSAccount(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    account_label = Column(String(100), nullable=True)     # "My AWS Account"
-    access_key_hint = Column(String(10), nullable=True)    # Last 4 chars of access key
+    account_label = Column(String(100), nullable=True)
+    access_key_hint = Column(String(10), nullable=True)
     region = Column(String(30), default="ap-south-1")
     monthly_bill = Column(Float, default=0.0)
     services_used = Column(Integer, default=0)
@@ -78,3 +88,20 @@ class AWSAccount(Base):
 
     def __repr__(self):
         return f"<AWSAccount {self.account_label}>"
+
+
+class BillingThreshold(Base):
+    __tablename__ = "billing_thresholds"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    service_name = Column(String(200), nullable=False)   # "TOTAL", "Amazon EC2", etc.
+    limit_value = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    user = relationship("User", back_populates="billing_thresholds")
+
+    def __repr__(self):
+        return f"<BillingThreshold {self.service_name}={self.limit_value}>"

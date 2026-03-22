@@ -1,15 +1,12 @@
 /**
  * BillingDashboard.jsx
- * Place in: frontend/src/pages/BillingDashboard.jsx
  *
- * Install: npm install axios recharts
- *
- * Shows LIVE AWS billing data fetched using credentials in backend/.env
- * Displays account identity, real costs, threshold bars, daily chart,
- * threshold editor, and manual alert trigger.
+ * LIVE AWS billing dashboard with per-user DB-backed thresholds.
+ * Auto-refreshes every 60 seconds. Email alerts go to the logged-in user's email.
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '../context/AuthContext'
 import axios from 'axios'
 import {
   AreaChart, Area, XAxis, YAxis,
@@ -46,7 +43,7 @@ const F = {
 const fmt4  = (n) => Number(n || 0).toFixed(4)
 const fmt6  = (n) => Number(n || 0).toFixed(6)
 const pct   = (cost, limit) => limit ? Math.min((cost / limit) * 100, 100).toFixed(1) : 0
-const color = (breached, pctVal) => breached ? C.error : pctVal > 75 ? C.warn : C.success
+const barColor = (breached, pctVal) => breached ? C.error : pctVal > 75 ? C.warn : C.success
 
 function Spinner({ size = 20, c = C.accent }) {
   return <div style={{
@@ -67,15 +64,15 @@ function AccountBar({ account }) {
       display: 'flex', alignItems: 'center', gap: 32,
       flexWrap: 'wrap'
     }}>
-      <Field label="Account ID"  value={account.account_id} mono />
-      <Field label="Access Key"  value={account.key_masked}  mono accent />
-      <Field label="Region"      value={account.region}      mono />
-      <Field label="ARN"         value={account.arn}         mono small />
+      <DataField label="Account ID"  value={account.account_id} mono />
+      <DataField label="Access Key"  value={account.key_masked}  mono accent />
+      <DataField label="Region"      value={account.region}      mono />
+      <DataField label="ARN"         value={account.arn}         mono small />
     </div>
   )
 }
 
-function Field({ label, value, mono, accent: isAccent, small }) {
+function DataField({ label, value, mono, accent: isAccent, small }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <span style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
@@ -186,7 +183,7 @@ function DailyChart({ daily }) {
 // ── Service Row ────────────────────────────────────────────────
 function ServiceRow({ svc }) {
   const p   = pct(svc.cost, svc.threshold)
-  const clr = color(svc.breached, p)
+  const clr = barColor(svc.breached, p)
 
   return (
     <div style={{
@@ -235,7 +232,7 @@ function ServiceRow({ svc }) {
 }
 
 // ── Threshold Editor ───────────────────────────────────────────
-function ThresholdEditor({ thresholds, allServices, onSave, saving }) {
+function ThresholdEditor({ thresholds, onSave, saving }) {
   const [vals, setVals]           = useState({ ...thresholds })
   const [newSvc, setNewSvc]       = useState('')
   const [newLimit, setNewLimit]   = useState('')
@@ -259,7 +256,6 @@ function ThresholdEditor({ thresholds, allServices, onSave, saving }) {
     outline: 'none',
   }
 
-  // Ordered: TOTAL first, then rest alphabetically
   const ordered = [
     ['TOTAL', vals['TOTAL']],
     ...Object.entries(vals).filter(([k]) => k !== 'TOTAL').sort(([a], [b]) => a.localeCompare(b))
@@ -278,7 +274,7 @@ function ThresholdEditor({ thresholds, allServices, onSave, saving }) {
             Cost Thresholds
           </div>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
-            Alert email fires when any limit is crossed
+            Alert email sent to your account when any limit is crossed
           </div>
         </div>
         <button onClick={() => onSave(vals)} disabled={saving} style={{
@@ -300,7 +296,7 @@ function ThresholdEditor({ thresholds, allServices, onSave, saving }) {
             border: `1px solid ${key === 'TOTAL' ? 'rgba(255,153,0,0.2)' : C.border}`,
           }}>
             <span style={{
-              flex: 1, fontSize: 12, fontFamily: F.mono, color: C.text,
+              flex: 1, fontSize: 12, fontFamily: F.mono,
               fontWeight: key === 'TOTAL' ? 700 : 400,
               color: key === 'TOTAL' ? C.accent : C.text,
             }}>
@@ -362,41 +358,6 @@ function ThresholdEditor({ thresholds, allServices, onSave, saving }) {
   )
 }
 
-// ── SMTP Config Hint ───────────────────────────────────────────
-function SMTPHint() {
-  const [open, setOpen] = useState(false)
-  return (
-    <div>
-      <button onClick={() => setOpen(p => !p)} style={{
-        background: 'transparent', border: 'none',
-        color: C.cyan, fontSize: 12, cursor: 'pointer',
-        textDecoration: 'underline', fontFamily: F.body
-      }}>
-        {open ? '▲ Hide' : '▼'} Email alert setup (SMTP)
-      </button>
-      {open && (
-        <div style={{
-          background: C.surface2, border: `1px solid ${C.border}`,
-          borderLeft: `3px solid ${C.cyan}`,
-          borderRadius: 8, padding: '14px 18px', marginTop: 8,
-          fontSize: 12, color: C.muted, lineHeight: 2, fontFamily: F.mono
-        }}>
-          Add to backend/.env:<br />
-          <span style={{ color: C.text }}>SMTP_HOST</span>=smtp.gmail.com<br />
-          <span style={{ color: C.text }}>SMTP_PORT</span>=587<br />
-          <span style={{ color: C.text }}>SMTP_USER</span>=you@gmail.com<br />
-          <span style={{ color: C.text }}>SMTP_PASSWORD</span>=xxxx xxxx xxxx xxxx
-          <span style={{ color: C.dim }}> ← Gmail App Password</span><br />
-          <span style={{ color: C.text }}>SMTP_FROM</span>=you@gmail.com<br />
-          <span style={{ color: C.text }}>ALERT_EMAIL</span>=alerts@yourapp.com<br /><br />
-          <span style={{ color: C.accent }}>Gmail App Password: </span>
-          Google Account → Security → 2-Step Verification → App Passwords
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ── Breach Banner ──────────────────────────────────────────────
 function BreachBanner({ services, totalBreached, total, totalLimit }) {
   const svcBreaches = services.filter(s => s.breached)
@@ -421,8 +382,20 @@ function BreachBanner({ services, totalBreached, total, totalLimit }) {
   )
 }
 
+// ── Countdown Timer ────────────────────────────────────────────
+function CountdownTimer({ seconds }) {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return (
+    <span style={{ fontSize: 11, fontFamily: F.mono, color: C.dim }}>
+      {m}:{s.toString().padStart(2, '0')}
+    </span>
+  )
+}
+
 // ── Main Dashboard ─────────────────────────────────────────────
 export default function BillingDashboard() {
+  const { token } = useAuth()
   const [summary,    setSummary]    = useState(null)
   const [loading,    setLoading]    = useState(true)
   const [checking,   setChecking]   = useState(false)
@@ -430,7 +403,9 @@ export default function BillingDashboard() {
   const [error,      setError]      = useState(null)
   const [toast,      setToast]      = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
-  const [autoRefresh, setAutoRefresh] = useState(false)
+  const [countdown,  setCountdown]  = useState(60)
+
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
 
   const showToast = (msg, type = 'ok') => {
     setToast({ msg, type })
@@ -440,35 +415,39 @@ export default function BillingDashboard() {
   const fetchSummary = useCallback(async () => {
     setError(null)
     try {
-      const { data } = await axios.get(`${API}/billing/summary`)
+      const { data } = await axios.get(`${API}/billing/summary`, { headers })
       setSummary(data.summary)
       setLastUpdate(new Date().toLocaleTimeString())
+      setCountdown(60)
     } catch (e) {
       const detail = e.response?.data?.detail || e.message
       setError(detail)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [token])
 
+  // Initial fetch
   useEffect(() => { fetchSummary() }, [fetchSummary])
 
-  // Auto-refresh every 5 minutes
+  // Auto-refresh every 60 seconds
   useEffect(() => {
-    if (!autoRefresh) return
-    const id = setInterval(fetchSummary, 5 * 60 * 1000)
-    return () => clearInterval(id)
-  }, [autoRefresh, fetchSummary])
+    const refreshId = setInterval(fetchSummary, 60 * 1000)
+    const countId   = setInterval(() => setCountdown(prev => prev > 0 ? prev - 1 : 60), 1000)
+    return () => { clearInterval(refreshId); clearInterval(countId) }
+  }, [fetchSummary])
 
   const runCheck = async () => {
     setChecking(true)
     try {
-      const { data } = await axios.post(`${API}/billing/check`)
+      const { data } = await axios.post(`${API}/billing/check`, {}, { headers })
       await fetchSummary()
       if (data.email_sent) {
         showToast(`✅ ${data.breaches.length} breach(es) found — alert email sent!`)
+      } else if (data.already_notified) {
+        showToast('ℹ️ Breaches active — you were already notified', 'warn')
       } else if (data.breaches.length > 0) {
-        showToast('⚠️ Breaches found but SMTP not configured — check .env', 'warn')
+        showToast('⚠️ Breaches found but email not configured', 'warn')
       } else {
         showToast('✅ All costs within limits — no alert needed')
       }
@@ -482,8 +461,8 @@ export default function BillingDashboard() {
   const saveThresholds = async (vals) => {
     setSaving(true)
     try {
-      await axios.post(`${API}/billing/thresholds`, { thresholds: vals })
-      showToast('✅ Thresholds saved')
+      await axios.post(`${API}/billing/thresholds`, { thresholds: vals }, { headers })
+      showToast('✅ Thresholds saved to your account')
       await fetchSummary()
     } catch (e) {
       showToast('❌ Failed to save', 'error')
@@ -526,15 +505,12 @@ export default function BillingDashboard() {
             AWS Billing Dashboard
           </h1>
           <div style={{ fontSize: 13, color: C.muted }}>
-            Live data from your AWS account
+            Live data · Auto-refreshes every 60s
             {lastUpdate && <span style={{ marginLeft: 10, color: C.dim }}>· Updated {lastUpdate}</span>}
+            <span style={{ marginLeft: 10 }}><CountdownTimer seconds={countdown} /></span>
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-            <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
-            Auto-refresh (5 min)
-          </label>
           <button onClick={fetchSummary} style={{
             padding: '9px 16px', background: C.surface, border: `1px solid ${C.border}`,
             borderRadius: 6, color: C.muted, fontSize: 13, cursor: 'pointer',
@@ -621,15 +597,13 @@ export default function BillingDashboard() {
               </div>
             </div>
 
-            {/* Threshold editor + SMTP hint */}
+            {/* Threshold editor */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <ThresholdEditor
                 thresholds={summary.thresholds || {}}
-                allServices={summary.services || []}
                 onSave={saveThresholds}
                 saving={saving}
               />
-              <SMTPHint />
             </div>
           </div>
         </div>

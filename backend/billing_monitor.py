@@ -268,11 +268,11 @@ def build_email_html(billing: dict, breaches: list, thresholds: dict) -> str:
 </div></body></html>"""
 
 
-def send_alert_email(billing: dict, breaches: list, thresholds: dict) -> bool:
+def send_alert_email(billing: dict, breaches: list, thresholds: dict, recipient: str = None) -> bool:
     smtp_user = os.getenv("SMTP_USER", "").strip()
     smtp_pass = os.getenv("SMTP_PASSWORD", "").strip()
     smtp_from = os.getenv("SMTP_FROM", smtp_user).strip()
-    alert_to  = os.getenv("ALERT_EMAIL", "").strip()
+    alert_to  = recipient or os.getenv("ALERT_EMAIL", "").strip()
 
     if not smtp_user or not alert_to:
         print("⚠️  [EMAIL] Not configured — set SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL in .env")

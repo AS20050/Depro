@@ -3,6 +3,7 @@ import re
 from urllib.parse import urlparse, unquote
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -74,8 +75,32 @@ async def get_db():
 
 
 async def init_db():
-    """Create all tables on startup."""
+    """Create new tables and migrate existing ones (non-destructive)."""
     async with engine.begin() as conn:
-        from db.models import User, Deployment, AWSAccount  # noqa
+        from db.models import User, Deployment, AWSAccount, BillingThreshold  # noqa
+
+        # 1. Create any tables that don't exist yet
         await conn.run_sync(Base.metadata.create_all)
-    print("✅ [DB] Tables created / verified.")
+
+        # 2. Safe column migrations — ADD COLUMN IF NOT EXISTS
+        #    This handles cases where we added new columns to existing tables.
+        migrations = [
+            # Deployment table — columns added after initial creation
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS source_type VARCHAR(20)",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS source_filename VARCHAR(255)",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS repo_url TEXT",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS file_path TEXT",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS aws_service VARCHAR(50)",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS aws_region VARCHAR(30) DEFAULT 'ap-south-1'",
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()",
+            # User table — billing alert tracking
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS billing_alerted_total DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS billing_alert_sent_at TIMESTAMPTZ",
+            # User table — AWS vault reference
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS aws_access_key_id VARCHAR(50)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS aws_default_region VARCHAR(30) DEFAULT 'ap-south-1'",
+        ]
+        for sql in migrations:
+            await conn.execute(text(sql))
+
+    print("✅ [DB] Tables created / migrated.")

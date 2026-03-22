@@ -336,6 +336,7 @@ from endpoints.deployments import router as deployments_router
 from endpoints.aws_accounts import router as aws_accounts_router
 from endpoints.deployment_service import record_deployment
 from billing_routes import router as billing_router
+from endpoints.vault import router as vault_router
 
 JWT_SECRET = os.getenv("JWT_SECRET", "depro-fallback-secret")
 
@@ -381,6 +382,7 @@ app.include_router(dashboard_router)
 app.include_router(deployments_router)
 app.include_router(aws_accounts_router)
 app.include_router(billing_router, prefix="/billing", tags=["Billing"])
+app.include_router(vault_router)
 
 # ---------------- STORAGE ----------------
 UPLOAD_DIR  = Path("storage/uploads")
@@ -391,6 +393,120 @@ EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
+# CREDENTIAL RESOLUTION HELPERS
+# =========================================================
+async def _resolve_aws_creds(
+    user_id: str | None,
+    form_key: str | None = None,
+    form_secret: str | None = None,
+    form_region: str | None = None,
+) -> dict | None:
+    """
+    Try to resolve AWS credentials in order:
+    1. Form-submitted creds (user just provided them)
+    2. Algorand vault (user previously stored them)
+    Returns None if no credentials are available anywhere.
+    """
+    # 1. Form submission (user explicitly sent creds)
+    if form_key and form_secret:
+        print("🔐 AWS Credentials received via form.")
+        return {
+            "AWS_ACCESS_KEY_ID":     form_key.strip(),
+            "AWS_SECRET_ACCESS_KEY": form_secret.strip(),
+            "AWS_DEFAULT_REGION":    (form_region or "ap-south-1").strip(),
+        }
+
+    # 2. Algorand vault lookup
+    if user_id:
+        try:
+            from sqlalchemy import select
+            from db.database import async_session
+            from db.models import User as UserModel
+            async with async_session() as sess:
+                result = await sess.execute(
+                    select(UserModel.aws_access_key_id).where(UserModel.id == user_id)
+                )
+                stored_key = result.scalar_one_or_none()
+                if stored_key:
+                    from credential_vault import vault_retrieve
+                    vault_data = vault_retrieve(stored_key)
+                    print(f"🔐 AWS Credentials retrieved from Algorand vault ({stored_key[:8]}****)")
+                    return {
+                        "AWS_ACCESS_KEY_ID":     vault_data["AWS_ACCESS_KEY_ID"],
+                        "AWS_SECRET_ACCESS_KEY": vault_data["AWS_SECRET_ACCESS_KEY"],
+                        "AWS_DEFAULT_REGION":    vault_data.get("AWS_DEFAULT_REGION", "ap-south-1"),
+                    }
+        except Exception as ve:
+            print(f"⚠️ Vault retrieval failed: {ve}")
+
+    return None
+
+
+async def _store_creds_to_vault(user_id: str, creds: dict):
+    """
+    Store IAM credentials to Algorand vault and save access_key_id in user's DB record.
+    Called once on first-time credential submission.
+    """
+    try:
+        from credential_vault import vault_store
+        from sqlalchemy import select
+        from db.database import async_session
+        from db.models import User as UserModel
+
+        access_key = creds["AWS_ACCESS_KEY_ID"]
+        vault_store(
+            access_key_id=access_key,
+            secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
+            region=creds.get("AWS_DEFAULT_REGION", "ap-south-1"),
+        )
+
+        async with async_session() as sess:
+            result = await sess.execute(select(UserModel).where(UserModel.id == user_id))
+            user = result.scalar_one_or_none()
+            if user:
+                user.aws_access_key_id = access_key
+                user.aws_default_region = creds.get("AWS_DEFAULT_REGION", "ap-south-1")
+                await sess.commit()
+        print(f"🔐 [VAULT] Credentials stored for user {user_id}")
+    except Exception as e:
+        print(f"⚠️ [VAULT] Failed to store credentials: {e}")
+
+
+async def _store_github_token(user_id: str, github_token: str):
+    """Save GitHub PAT in user's DB record."""
+    try:
+        from sqlalchemy import select
+        from db.database import async_session
+        from db.models import User as UserModel
+
+        async with async_session() as sess:
+            result = await sess.execute(select(UserModel).where(UserModel.id == user_id))
+            user = result.scalar_one_or_none()
+            if user:
+                user.github_token = github_token
+                await sess.commit()
+        print(f"🔑 [DB] GitHub PAT stored for user {user_id}")
+    except Exception as e:
+        print(f"⚠️ [DB] Failed to store GitHub token: {e}")
+
+
+async def _get_stored_github_token(user_id: str) -> str | None:
+    """Get previously stored GitHub PAT from DB."""
+    try:
+        from sqlalchemy import select
+        from db.database import async_session
+        from db.models import User as UserModel
+
+        async with async_session() as sess:
+            result = await sess.execute(
+                select(UserModel.github_token).where(UserModel.id == user_id)
+            )
+            return result.scalar_one_or_none()
+    except Exception:
+        return None
+
+
+# =========================================================
 # 1️⃣ GENERIC UPLOAD + ORCHESTRATION
 # =========================================================
 @app.post("/upload")
@@ -398,6 +514,7 @@ async def upload_file(
     file: UploadFile = File(...),
     aws_access_key_id: str | None = Form(None),
     aws_secret_access_key: str | None = Form(None),
+    aws_default_region: str | None = Form(None),
     authorization: Optional[str] = Header(None)
 ):
     user_id = _extract_user_id(authorization)
@@ -426,7 +543,14 @@ async def upload_file(
                 shutil.rmtree(extract_path)
             extract_path.mkdir(parents=True, exist_ok=True)
             extract_zip(upload_path, extract_path)
-            print(f"📂 ZIP extracted to: {extract_path}")
+
+            # ZIPs often have a single root folder (e.g. "project-master/")
+            children = list(extract_path.iterdir())
+            if len(children) == 1 and children[0].is_dir():
+                extract_path = children[0]
+                print(f"📂 ZIP extracted to nested folder, using: {extract_path}")
+            else:
+                print(f"📂 ZIP extracted to: {extract_path}")
 
             review_output      = review_project(str(extract_path))
             deployment_context = review_output.copy()
@@ -455,20 +579,27 @@ async def upload_file(
             return result
 
         # -------------------------------------------------
-        # JAR → direct EC2 deployment
+        # JAR → needs AWS creds → vault check → deploy
         # -------------------------------------------------
         if filename.endswith(".jar"):
             print("\n📦 JAR detected → direct EC2 deployment")
-            if aws_access_key_id and aws_secret_access_key:
-                print("🔐 AWS Credentials received via API.")
-                creds = {
-                    "AWS_ACCESS_KEY_ID":     aws_access_key_id,
-                    "AWS_SECRET_ACCESS_KEY": aws_secret_access_key,
-                    "AWS_DEFAULT_REGION":    "ap-south-1"
+
+            # Resolve creds: form > vault > needs_credentials
+            creds = await _resolve_aws_creds(
+                user_id, aws_access_key_id, aws_secret_access_key, aws_default_region
+            )
+
+            if not creds:
+                return {
+                    "status": "needs_credentials",
+                    "needs": ["aws_iam"],
+                    "message": "AWS IAM credentials required. This is a one-time setup — they will be securely stored in Algorand vault.",
+                    "filename": filename,
                 }
-            else:
-                print("⚠️ No API credentials found. Falling back to terminal input...")
-                creds = ask_aws_credentials()
+
+            # First-time: store in vault for next time
+            if aws_access_key_id and aws_secret_access_key and user_id:
+                await _store_creds_to_vault(user_id, creds)
 
             inject_aws_creds(creds)
 
@@ -554,13 +685,48 @@ async def review_repo(request: ReviewRequest):
 # =========================================================
 @app.post("/upload/github")
 async def upload_github_repo(
-    repo_url:      str          = Form(...),
-    github_token:  str | None   = Form(None),
-    authorization: Optional[str] = Header(None)
+    repo_url:              str          = Form(...),
+    github_token:          str | None   = Form(None),
+    aws_access_key_id:     str | None   = Form(None),
+    aws_secret_access_key: str | None   = Form(None),
+    aws_default_region:    str | None   = Form(None),
+    authorization:         Optional[str] = Header(None)
 ):
     user_id = _extract_user_id(authorization)
     try:
-        repo_path = clone_github_repo(repo_url, github_token)
+        # --- Resolve GitHub PAT: form > DB > needs_credentials ---
+        resolved_gh_token = github_token
+        if not resolved_gh_token and user_id:
+            resolved_gh_token = await _get_stored_github_token(user_id)
+            if resolved_gh_token:
+                print("🔑 GitHub PAT retrieved from DB.")
+
+        # --- Resolve AWS creds: form > vault > needs_credentials ---
+        creds = await _resolve_aws_creds(
+            user_id, aws_access_key_id, aws_secret_access_key, aws_default_region
+        )
+
+        if not creds:
+            needs = ["aws_iam"]
+            if not resolved_gh_token:
+                needs.append("github_token")
+            return {
+                "status": "needs_credentials",
+                "needs": needs,
+                "message": "Credentials required. This is a one-time setup — IAM keys are stored in Algorand vault.",
+                "repo_url": repo_url,
+            }
+
+        # First time: store creds for next time
+        if user_id:
+            if aws_access_key_id and aws_secret_access_key:
+                await _store_creds_to_vault(user_id, creds)
+            if github_token:
+                await _store_github_token(user_id, github_token)
+
+        inject_aws_creds(creds)
+
+        repo_path = clone_github_repo(repo_url, resolved_gh_token)
         print(f"\n📦 GitHub repo cloned to: {repo_path}")
 
         review_output      = review_project(repo_path)
@@ -568,7 +734,7 @@ async def upload_github_repo(
         deployment_context["project_path"] = repo_path
         deployment_context["filename"]     = repo_url.split("/")[-1]
         deployment_context["repo_url"]     = repo_url
-        deployment_context["github_token"] = github_token
+        deployment_context["github_token"] = resolved_gh_token
 
         result = decide_and_execute(deployment_context)
 

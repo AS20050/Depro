@@ -49,17 +49,32 @@ def deploy_amplify_node_ex(source_path, app_name="depro-frontend"):
     print(f"✅ [SCRIPT] Zip created: {zip_file}")
 
     # ---------------- 3. CREATE/FIND APP ----------------
+    # For snapshot (ZIP) deploys, we need an app that is NOT connected to a repo.
+    # If the existing app is repo-connected, create a new one with '-snapshot' suffix.
     apps = amplify.list_apps()
     app_id = None
     
     for app in apps['apps']:
         if app['name'] == app_name:
-            app_id = app['appId']
-            print(f"🔍 [SCRIPT] Found existing Amplify App ID: {app_id}")
+            # Check if this app is repo-connected
+            repo = app.get('repository')
+            if repo:
+                print(f"⚠️ [SCRIPT] App '{app_name}' is connected to a repo. Creating snapshot app...")
+                app_id = None  # Force new app creation
+                app_name = f"{app_name}-snapshot"
+                # Check if snapshot app already exists
+                for a2 in apps['apps']:
+                    if a2['name'] == app_name and not a2.get('repository'):
+                        app_id = a2['appId']
+                        print(f"🔍 [SCRIPT] Found existing snapshot App ID: {app_id}")
+                        break
+            else:
+                app_id = app['appId']
+                print(f"🔍 [SCRIPT] Found existing Amplify App ID: {app_id}")
             break
     
     if not app_id:
-        print("🆕 [SCRIPT] Creating new Amplify App...")
+        print(f"🆕 [SCRIPT] Creating new Amplify App: {app_name}")
         res = amplify.create_app(name=app_name, platform='WEB')
         app_id = res['app']['appId']
         print(f"✅ [SCRIPT] App Created. ID: {app_id}")
