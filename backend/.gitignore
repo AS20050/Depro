@@ -11,6 +11,8 @@
 /mcpServer/__pycache__
 /mcpServer/infraScripts/__pycache__
 /mcpServer/tools/__pycache__
+/db/__pycache__
+/db/__pycache__/database.cpython-313.pyc
 /__pycache__
 .env
 /opsonic
