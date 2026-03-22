@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+cryptography
+py-algorand-sdk
+algosdk
+pydantic
+algorand-sdk
+puyapy
+boto3
+requests
+python-multipart

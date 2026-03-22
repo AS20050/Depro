@@ -5,8 +5,10 @@ import zipfile
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env")
 DEMO_DIR = ROOT / "demo_dapp"
 ZIP_PATH = ROOT / "demo_dapp.zip"
 
