@@ -1,13 +1,12 @@
 import getpass
 import os
-import dotenv
 def ask_aws_credentials():
     """
     Terminal-based AWS credential intake.
     Later replace with frontend form or AssumeRole.
     """
 
-    print("\nðŸ”? ENTER AWS IAM CREDENTIALS\n")
+    print("\nÃ°Å¸â€?? ENTER AWS IAM CREDENTIALS\n")
 
     access_key = input("AWS_ACCESS_KEY_ID: ").strip()
     secret_key = getpass.getpass("AWS_SECRET_ACCESS_KEY (hidden): ").strip()
