@@ -6,7 +6,7 @@
 #   cd algorand
 #   python scripts/check_vault_entry.py AKIA...
 #
-# If no argument is provided, it uses AWS_ACCESS_KEY_ID from `.env` / environment.
+ If no argument is provided, it uses AWS_ACCESS_KEY_ID from `.env` / environment.
 
 from __future__ import annotations
 
